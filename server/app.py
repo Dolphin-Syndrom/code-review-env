@@ -10,8 +10,9 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, Field
 
+import gradio as gr
 try:
-    from openenv.core.env_server.http_server import create_app
+    from openenv.core.env_server.http_server import create_fastapi_app
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
@@ -33,7 +34,7 @@ def _env_factory() -> CodeReviewEnvironment:
     return CodeReviewEnvironment()
 
 
-app = create_app(
+app = create_fastapi_app(
     _env_factory,
     ReviewAction,
     ReviewObservation,
@@ -126,6 +127,83 @@ def run_baseline() -> dict:
         }
 
     return {"baseline_scores": baseline_scores}
+
+
+# --- CUSTOM GRADIO UI FOR HUGGING FACE SPACE ---
+
+def update_task_view(task_id: str):
+    task = TASKS[task_id]
+    desc_md = f"**File:** `{task.file_name}` | **Difficulty:** `{task.difficulty}`\n\n{task.description}"
+    return desc_md, task.code
+
+
+def run_agent_simulation(task_id: str):
+    task = TASKS[task_id]
+    issues = detect_issues_rule_based(task)
+    comment = build_rule_comment(issues)
+    score = grade_review(issues, comment, task)
+    
+    score_md = f"### 🤖 Agent simulated successfully\n\n**Calculated Score:** `{score:.3f}`  \n**Issues Found:** {', '.join(issues) if issues else 'None'}"
+    return issues, comment, score, score_md
+
+
+def manual_submit(task_id: str, issues: list[str], comment: str):
+    task = TASKS[task_id]
+    score = grade_review(issues, comment, task)
+    score_md = f"### 📝 Manual review parsed\n\n**Calculated Score:** `{score:.3f}`"
+    return score, score_md
+
+hf_theme = gr.themes.Monochrome(
+    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+    primary_hue="zinc",
+    neutral_hue="slate",
+    text_size=gr.themes.sizes.text_md,
+)
+
+with gr.Blocks(theme=hf_theme, title="Code Review Environment") as custom_ui:
+    gr.Markdown("# 🛡️ Code Review Agent Simulator", elem_id="header")
+    gr.Markdown("Evaluate LLM agent performance on deterministic code review tasks with immediate rule-based grading.")
+    
+    with gr.Row():
+        with gr.Column(scale=5):
+            default_task_id = list(TASKS.keys())[0]
+            t = TASKS[default_task_id]
+            
+            task_selector = gr.Dropdown(label="Select Task Matrix", choices=list(TASKS.keys()), value=default_task_id)
+            task_desc = gr.Markdown(value=f"**File:** `{t.file_name}` | **Difficulty:** `{t.difficulty}`\n\n{t.description}")
+            task_code = gr.Code(language="python", value=t.code, interactive=False, label="Environment File")
+            
+            task_selector.change(
+                fn=update_task_view,
+                inputs=task_selector,
+                outputs=[task_desc, task_code]
+            )
+
+        with gr.Column(scale=4):
+            gr.Markdown("### Agent Output Sandbox")
+            agent_issues = gr.CheckboxGroup(label="Taxonomy Tags Outputted by Agent", choices=list(DETECTION_RULES.keys()))
+            agent_comment = gr.Textbox(label="Agent Review Comment", lines=4, placeholder="The agent's freeform text response goes here...")
+            
+            with gr.Row():
+                manual_btn = gr.Button("Evaluate Manual Input", variant="secondary")
+                baseline_btn = gr.Button("Simulate Baseline Agent", variant="primary")
+            
+            output_score_slider = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, label="Task Grader Score", interactive=False)
+            output_markdown = gr.Markdown(value="_Waiting for action..._")
+            
+            manual_btn.click(
+                fn=manual_submit,
+                inputs=[task_selector, agent_issues, agent_comment],
+                outputs=[output_score_slider, output_markdown]
+            )
+            
+            baseline_btn.click(
+                fn=run_agent_simulation,
+                inputs=[task_selector],
+                outputs=[agent_issues, agent_comment, output_score_slider, output_markdown]
+            )
+
+app = gr.mount_gradio_app(app, custom_ui, path="/")
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
